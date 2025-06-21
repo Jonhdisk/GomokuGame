@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="style.css" />
+    
+    <title>Gomoku Game - เกมโกะโมะคุออนไลน์</title>
+ 
+</head>
+<body>
+    <div class="header">
+        <h1>Gomoku Game</h1>
+        <p>เกมโกะโมะคุออนไลน์ - เรียง 5 ตัวให้ได้เพื่อชนะ!</p>
+    </div>
+
+    <div class="game-container">
+        <div class="controls">
+            <div class="control-group">
+                <label for="boardSize">ขนาดกระดาน:</label>
+                <select id="boardSize">
+                    <option value="15">15x15 (มาตรฐาน)</option>
+                    <option value="19">19x19 (ใหญ่)</option>
+                    <option value="13">13x13 (เล็ก)</option>
+                </select>
+            </div>
+            
+            <div class="control-group">
+                <label for="gameMode">โหมดเกม:</label>
+                <select id="gameMode">
+                    <option value="local">เล่น 2 คน (Local)</option>
+                    <option value="ai">เล่นกับ AI</option>
+                    <option value="online">เล่นออนไลน์</option>
+                </select>
+            </div>
+            
+            <button id="newGame">เกมใหม่</button>
+            <button id="showRules">กฎการเล่น</button>
+        </div>
+
+        <div class="status" id="gameStatus">
+            <div>⚫ Black play before</div>
+        </div>
+
+        <div class="game-board" id="gameBoard"></div>
+
+        <div class="online-section" id="onlineSection" style="display: none;">
+            <h3>เล่นออนไลน์กับเพื่อน</h3>
+            <p>สร้างห้องหรือเข้าร่วมห้องเพื่อเล่นกับเพื่อน</p>
+            <div class="room-controls">
+                <input type="text" id="roomId" class="room-input" placeholder="รหัสห้อง (เว้นว่างสำหรับสร้างห้องใหม่)">
+                <button id="createRoom">สร้างห้อง</button>
+                <button id="joinRoom">เข้าร่วมห้อง</button>
+            </div>
+            <div id="roomInfo" style="margin-top: 15px;"></div>
+        </div>
+    </div>
+
+    <!-- Modal สำหรับกฎการเล่น -->
+    <div class="modal" id="rulesModal">
+        <div class="modal-content">
+            <h2>กฎการเล่น Gomoku</h2>
+            <div class="rules">
+                <ul>
+                    <li><strong>เป้าหมาย:</strong> เรียงหมากให้ได้ 5 ตัวติดกันก่อน (แนวตั้ง, แนวนอน, หรือแนวทแยง)</li>
+                    <li><strong>การเล่น:</strong> ผู้เล่นสลับกันวางหมาก</li>
+                    <li><strong>การชนะ:</strong> ผู้ที่เรียงได้ 5 ตัวก่อนเป็นผู้ชนะ</li>
+                    <li><strong>กลยุทธ์:</strong> สร้างการคุกคาม 2 ทาง และป้องกันฝ่ายตรงข้าม</li>
+                    <li><strong>ออนไลน์:</strong> แชร์รหัสห้องให้เพื่อนเพื่อเล่นด้วยกัน</li>
+                </ul>
+            </div>
+            <button onclick="closeRulesModal()">เข้าใจแล้ว</button>
+        </div>
+    </div>
+
+    <script>
+        class GomokuGame {
+            constructor() {
+                this.boardSize = 15;
+                this.board = [];
+                this.currentPlayer = 1; // 1 = black/red, 2 = white/blue
+                this.gameMode = 'local';
+                this.gameOver = false;
+                this.winningCells = [];
+                this.isOnline = false;
+                this.roomId = null;
+                this.playerId = null;
+                this.playerNumber = null;
+                this.socket = null;
+                
+                this.initializeElements();
+                this.setupEventListeners();
+                this.initializeBoard();
+            }
+
+            initializeElements() {
+                this.boardElement = document.getElementById('gameBoard');
+                this.statusElement = document.getElementById('gameStatus');
+                this.boardSizeSelect = document.getElementById('boardSize');
+                this.gameModeSelect = document.getElementById('gameMode');
+                this.onlineSection = document.getElementById('onlineSection');
+                this.roomInput = document.getElementById('roomId');
+                this.roomInfo = document.getElementById('roomInfo');
+            }
+
+            setupEventListeners() {
+                document.getElementById('newGame').addEventListener('click', () => this.newGame());
+                document.getElementById('showRules').addEventListener('click', () => this.showRules());
+                this.boardSizeSelect.addEventListener('change', (e) => {
+                    this.boardSize = parseInt(e.target.value);
+                    this.newGame();
+                });
+                this.gameModeSelect.addEventListener('change', (e) => {
+                    this.gameMode = e.target.value;
+                    this.toggleOnlineSection();
+                    this.newGame();
+                });
+                document.getElementById('createRoom').addEventListener('click', () => this.createRoom());
+                document.getElementById('joinRoom').addEventListener('click', () => this.joinRoom());
+            }
+
+            toggleOnlineSection() {
+                if (this.gameMode === 'online') {
+                    this.onlineSection.style.display = 'block';
+                } else {
+                    this.onlineSection.style.display = 'none';
+                    if (this.socket) {
+                        this.socket.close();
+                        this.socket = null;
+                    }
+                }
+            }
+
+            initializeBoard() {
+                this.board = Array(this.boardSize).fill().map(() => Array(this.boardSize).fill(0));
+                this.boardElement.style.gridTemplateColumns = `repeat(${this.boardSize}, 1fr)`;
+                this.boardElement.innerHTML = '';
+                
+                // คำนวณขนาด cell ให้เหมาะสม
+                const maxBoardSize = Math.min(window.innerWidth * 0.8, window.innerHeight * 0.6);
+                const cellSize = Math.floor(maxBoardSize / this.boardSize);
+                const minCellSize = 20;
+                const finalCellSize = Math.max(cellSize, minCellSize);
+                
+                for (let i = 0; i < this.boardSize; i++) {
+                    for (let j = 0; j < this.boardSize; j++) {
+                        const cell = document.createElement('div');
+                        cell.className = 'cell';
+                        cell.dataset.row = i;
+                        cell.dataset.col = j;
+                        cell.style.width = `${finalCellSize}px`;
+                        cell.style.height = `${finalCellSize}px`;
+                        cell.addEventListener('click', () => this.makeMove(i, j));
+                        this.boardElement.appendChild(cell);
+                    }
+                }
+            }
+
+            newGame() {
+                this.gameOver = false;
+                this.currentPlayer = 1;
+                this.winningCells = [];
+                this.updateStatus('⚫ Black play before');
+                this.initializeBoard();
+                
+                if (this.isOnline && this.socket && this.socket.readyState === WebSocket.OPEN) {
+                    this.socket.send(JSON.stringify({
+                        type: 'newGame',
+                        roomId: this.roomId
+                    }));
+                }
+            }
+
+            makeMove(row, col) {
+                if (this.gameOver || this.board[row][col] !== 0) return;
+                
+                // ตรวจสอบการเล่นออนไลน์
+                if (this.isOnline) {
+                    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+                        this.updateStatus('❌ ไม่ได้เชื่อมต่อกับเซิร์ฟเวอร์');
+                        return;
+                    }
+                    if (this.playerNumber !== this.currentPlayer) {
+                        this.updateStatus('⏳ รอคู่ต่อสู้เล่น...');
+                        return;
+                    }
+                }
+
+                this.board[row][col] = this.currentPlayer;
+                this.updateBoard();
+                
+                if (this.checkWin(row, col)) {
+                    this.gameOver = true;
+                    const playerName = this.currentPlayer === 1 ? 'Black' : 'White';
+                    this.updateStatus(`🎉 Player${playerName}Victory!`);
+                    this.highlightWinningCells();
+                    
+                    if (this.isOnline && this.socket && this.socket.readyState === WebSocket.OPEN) {
+                        this.socket.send(JSON.stringify({
+                            type: 'gameOver',
+                            roomId: this.roomId,
+                            winner: this.currentPlayer
+                        }));
+                    }
+                    return;
+                }
+                
+                const emptyCells = this.getEmptyCells();
+                if (emptyCells.length === 0) {
+                    this.gameOver = true;
+                    this.updateStatus('🤝 Draw!');
+                    return;
+                }
+
+                // ส่งข้อมูลการเล่นออนไลน์
+                if (this.isOnline && this.socket && this.socket.readyState === WebSocket.OPEN) {
+                    this.socket.send(JSON.stringify({
+                        type: 'move',
+                        roomId: this.roomId,
+                        row: row,
+                        col: col,
+                        player: this.currentPlayer
+                    }));
+                }
+
+                this.currentPlayer = this.currentPlayer === 1 ? 2 : 1;
+                
+                if (this.gameMode === 'ai' && this.currentPlayer === 2 && !this.gameOver) {
+                    setTimeout(() => this.makeAIMove(), 500);
+                } else if (!this.isOnline) {
+                    const playerName = this.currentPlayer === 1 ? 'Black' : 'White';
+                    this.updateStatus(`${this.currentPlayer === 1 ? '⚫' : '⚪'} Turn${playerName}`);
+                }
+            }
+
+            makeAIMove() {
+                if (this.gameOver) return;
+                
+                const move = this.getBestMove();
+                if (move) {
+                    this.makeMove(move.row, move.col);
+                }
+            }
+
+            getBestMove() {
+                // AI Strategy: ตรวจสอบการชนะ -> ป้องกันการแพ้ -> หาตำแหน่งที่ดี
+                
+                // 1. ตรวจสอบว่า AI สามารถชนะได้ไหม
+                for (let i = 0; i < this.boardSize; i++) {
+                    for (let j = 0; j < this.boardSize; j++) {
+                        if (this.board[i][j] === 0) {
+                            this.board[i][j] = 2;
+                            if (this.checkWin(i, j)) {
+                                this.board[i][j] = 0;
+                                return { row: i, col: j };
+                            }
+                            this.board[i][j] = 0;
+                        }
+                    }
+                }
+                
+                // 2. ตรวจสอบว่าต้องป้องกันผู้เล่นไหม
+                for (let i = 0; i < this.boardSize; i++) {
+                    for (let j = 0; j < this.boardSize; j++) {
+                        if (this.board[i][j] === 0) {
+                            this.board[i][j] = 1;
+                            if (this.checkWin(i, j)) {
+                                this.board[i][j] = 0;
+                                return { row: i, col: j };
+                            }
+                            this.board[i][j] = 0;
+                        }
+                    }
+                }
+                
+                // 3. หาตำแหน่งที่ดีที่สุด
+                const emptyCells = this.getEmptyCells();
+                let bestScore = -Infinity;
+                let bestMove = null;
+                
+                for (const cell of emptyCells) {
+                    const score = this.evaluatePosition(cell.row, cell.col, 2);
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestMove = cell;
+                    }
+                }
+                
+                return bestMove || emptyCells[Math.floor(Math.random() * emptyCells.length)];
+            }
+
+            evaluatePosition(row, col, player) {
+                let score = 0;
+                const directions = [[0,1], [1,0], [1,1], [1,-1]];
+                
+                for (const [dr, dc] of directions) {
+                    let count = 1;
+                    let blocked = 0;
+                    
+                    // ตรวจสอบทิศทางบวก
+                    let r = row + dr, c = col + dc;
+                    while (r >= 0 && r < this.boardSize && c >= 0 && c < this.boardSize) {
+                        if (this.board[r][c] === player) {
+                            count++;
+                        } else if (this.board[r][c] === 0) {
+                            break;
+                        } else {
+                            blocked++;
+                            break;
+                        }
+                        r += dr;
+                        c += dc;
+                    }
+                    
+                    // ตรวจสอบทิศทางลบ
+                    r = row - dr;
+                    c = col - dc;
+                    while (r >= 0 && r < this.boardSize && c >= 0 && c < this.boardSize) {
+                        if (this.board[r][c] === player) {
+                            count++;
+                        } else if (this.board[r][c] === 0) {
+                            break;
+                        } else {
+                            blocked++;
+                            break;
+                        }
+                        r -= dr;
+                        c -= dc;
+                    }
+                    
+                    // คะแนนตามจำนวนตัวต่อเนื่อง
+                    if (blocked < 2) {
+                        switch (count) {
+                            case 2: score += 10; break;
+                            case 3: score += 100; break;
+                            case 4: score += 1000; break;
+                            case 5: score += 10000; break;
+                        }
+                    }
+                }
+                
+                // คะแนนพิเศษสำหรับตำแหน่งกลาง
+                const centerDistance = Math.abs(row - this.boardSize/2) + Math.abs(col - this.boardSize/2);
+                score += Math.max(0, 10 - centerDistance);
+                
+                return score;
+            }
+
+            getEmptyCells() {
+                const empty = [];
+                for (let i = 0; i < this.boardSize; i++) {
+                    for (let j = 0; j < this.boardSize; j++) {
+                        if (this.board[i][j] === 0) {
+                            empty.push({ row: i, col: j });
+                        }
+                    }
+                }
+                return empty;
+            }
+
+            checkWin(row, col) {
+                const player = this.board[row][col];
+                const directions = [[0,1], [1,0], [1,1], [1,-1]];
+                
+                for (const [dr, dc] of directions) {
+                    let count = 1;
+                    const winCells = [[row, col]];
+                    
+                    // ตรวจสอบทิศทางบวก
+                    let r = row + dr, c = col + dc;
+                    while (r >= 0 && r < this.boardSize && c >= 0 && c < this.boardSize && 
+                           this.board[r][c] === player) {
+                        count++;
+                        winCells.push([r, c]);
+                        r += dr;
+                        c += dc;
+                    }
+                    
+                    // ตรวจสอบทิศทางลบ
+                    r = row - dr;
+                    c = col - dc;
+                    while (r >= 0 && r < this.boardSize && c >= 0 && c < this.boardSize && 
+                           this.board[r][c] === player) {
+                        count++;
+                        winCells.unshift([r, c]);
+                        r -= dr;
+                        c -= dc;
+                    }
+                    
+                    if (count >= 5) {
+                        this.winningCells = winCells;
+                        return true;
+                    }
+                }
+                
+                return false;
+            }
+
+            highlightWinningCells() {
+                for (const [row, col] of this.winningCells) {
+                    const cell = this.boardElement.children[row * this.boardSize + col];
+                    cell.classList.add('winning-line');
+                }
+            }
+
+            updateBoard() {
+                for (let i = 0; i < this.boardSize; i++) {
+                    for (let j = 0; j < this.boardSize; j++) {
+                        const cell = this.boardElement.children[i * this.boardSize + j];
+                        cell.className = 'cell';
+                        
+                        if (this.board[i][j] === 1) {
+                            cell.classList.add('black');
+                        } else if (this.board[i][j] === 2) {
+                            cell.classList.add('white');
+                        }
+                    }
+                }
+            }
+
+            updateStatus(message) {
+                this.statusElement.innerHTML = `<div>${message}</div>`;
+            }
+
+            showRules() {
+                document.getElementById('rulesModal').style.display = 'flex';
+            }
+
+            // Online Multiplayer Functions
+            createRoom() {
+                const customRoomId = this.roomInput.value.trim();
+                const roomId = customRoomId || this.generateRoomId();
+                this.connectWebSocket(roomId, true);
+            }
+
+            joinRoom() {
+                const roomId = this.roomInput.value.trim();
+                if (!roomId) {
+                    alert('กรุณาใส่รหัสห้อง');
+                    return;
+                }
+                this.connectWebSocket(roomId, false);
+            }
+
+            generateRoomId() {
+                return Math.random().toString(36).substring(2, 8).toUpperCase();
+            }
+
+            connectWebSocket(roomId, isCreator) {
+                // จำลองการเชื่อมต่อ WebSocket (ในการใช้งานจริงต้องมีเซิร์ฟเวอร์)
+                // สำหรับการทดสอบ เราจะใช้ localStorage สำหรับการสื่อสาร
+                this.startLocalMultiplayer(roomId);
+            }
+
+            startLocalMultiplayer(roomId) {
+                // จำลองระบบออนไลน์ด้วย localStorage และ polling
+                this.roomKey = `gomoku_room_${roomId}`;
+                
+                // ตั้งค่าข้อมูลห้อง
+                const roomData = JSON.parse(localStorage.getItem(this.roomKey) || '{}');
+                
+                if (!roomData.players) {
+                    roomData.players = [];
+                    roomData.board = Array(this.boardSize).fill().map(() => Array(this.boardSize).fill(0));
+                    roomData.currentPlayer = 1;
+                    roomData.gameOver = false;
+                }
+                
+                // เพิ่มผู้เล่นเข้าห้อง
+                const existingPlayer = roomData.players.find(p => p.id === this.playerId);
+                if (!existingPlayer) {
+                    roomData.players.push({
+                        id: this.playerId,
+                        number: roomData.players.length + 1,
+                        joinedAt: Date.now()
+                    });
+                }
+                
+                localStorage.setItem(this.roomKey, JSON.stringify(roomData));
+                
+                // เริ่มการตรวจสอบการเปลี่ยนแปลง
+                this.startPolling();
+            }
+
+            startPolling() {
+                if (this.pollingInterval) {
+                    clearInterval(this.pollingInterval);
+                }
+                
+                this.pollingInterval = setInterval(() => {
+                    this.checkForUpdates();
+                }, 1000);
+            }
+
+            checkForUpdates() {
+                const roomData = JSON.parse(localStorage.getItem(this.roomKey) || '{}');
+                
+                if (!roomData.players) return;
+                
+                // ตรวจสอบจำนวนผู้เล่น
+                if (roomData.players.length === 2) {
+                    // เกมพร้อมเริ่ม
+                    if (this.roomInfo.innerHTML.includes('Waiting for player')) {
+                        this.roomInfo.innerHTML = `
+                            <div style="color: #4CAF50; font-weight: bold;">Full player</div>
+                            <div>รหัสห้อง: <strong>${this.roomId}</strong></div>
+                            <div>คุณเป็นผู้เล่นที่ ${this.playerNumber} (${this.playerNumber === 1 ? 'สีแดง' : 'สีขาว'})</div>
+                        `;
+                        this.updateStatus('🎮 GameStart');
+                    }
+                    
+                    // ซิงค์สถานะเกม
+                    this.syncGameState(roomData);
+                }
+            }
+
+            syncGameState(roomData) {
+                // ตรวจสอบว่าเกมมีการเปลี่ยนแปลงหรือไม่
+                const boardChanged = JSON.stringify(this.board) !== JSON.stringify(roomData.board);
+                
+                if (boardChanged) {
+                    this.board = roomData.board;
+                    this.currentPlayer = roomData.currentPlayer;
+                    this.gameOver = roomData.gameOver;
+                    this.updateBoard();
+                    
+                    if (this.gameOver) {
+                        const winner = roomData.winner;
+                        const playerName = winner === 1 ? 'Black' : 'White';
+                        this.updateStatus(`🎉 Player${playerName}Victory!`);
+                        this.winningCells = roomData.winningCells || [];
+                        this.highlightWinningCells();
+                    } else {
+                        const playerName = this.currentPlayer === 1 ? 'Black' : 'White';
+                        if (this.currentPlayer === this.playerNumber) {
+                            this.updateStatus(`${this.currentPlayer === 1 ? '⚫' : '⚪'} Turn (${playerName})`);
+                        } else {
+                            this.updateStatus(`${this.currentPlayer === 1 ? '⚫' : '⚪'} Waiting${playerName}Play...`);
+                        }
+                    }
+                }
+            }
+
+            // Override makeMove สำหรับโหมดออนไลน์
+            makeMoveOnline(row, col) {
+                if (this.gameOver || this.board[row][col] !== 0) return;
+                
+                if (this.playerNumber !== this.currentPlayer) {
+                    this.updateStatus('⏳ ยังไม่ถึงตาของคุณ');
+                    return;
+                }
+
+                // อัปเดตเกมในเครื่อง
+                this.board[row][col] = this.currentPlayer;
+                this.updateBoard();
+                
+                // ตรวจสอบการชนะ
+                if (this.checkWin(row, col)) {
+                    this.gameOver = true;
+                    const playerName = this.currentPlayer === 1 ? 'Black' : 'White';
+                    this.updateStatus(`Victory! (${playerName})`);
+                    this.highlightWinningCells();
+                }
+                
+                // อัปเดตข้อมูลใน localStorage
+                const roomData = JSON.parse(localStorage.getItem(this.roomKey) || '{}');
+                roomData.board = this.board;
+                roomData.currentPlayer = this.currentPlayer === 1 ? 2 : 1;
+                roomData.gameOver = this.gameOver;
+                
+                if (this.gameOver) {
+                    roomData.winner = this.currentPlayer;
+                    roomData.winningCells = this.winningCells;
+                } else {
+                    this.currentPlayer = roomData.currentPlayer;
+                }
+                
+                localStorage.setItem(this.roomKey, JSON.stringify(roomData));
+                
+                // ตรวจสอบเสมอ
+                const emptyCells = this.getEmptyCells();
+                if (emptyCells.length === 0 && !this.gameOver) {
+                    this.gameOver = true;
+                    roomData.gameOver = true;
+                    roomData.winner = 0; // เสมอ
+                    localStorage.setItem(this.roomKey, JSON.stringify(roomData));
+                    this.updateStatus('🤝 Draw!');
+                }
+            }
+
+            // Override makeMove ให้รองรับโหมดออนไลน์
+            makeMove(row, col) {
+                if (this.isOnline) {
+                    this.makeMoveOnline(row, col);
+                } else {
+                    this.makeMoveLocal(row, col);
+                }
+            }
+
+            makeMoveLocal(row, col) {
+                if (this.gameOver || this.board[row][col] !== 0) return;
+
+                this.board[row][col] = this.currentPlayer;
+                this.updateBoard();
+                
+                if (this.checkWin(row, col)) {
+                    this.gameOver = true;
+                    const playerName = this.currentPlayer === 1 ? 'Black' : 'White';
+                    this.updateStatus(`🎉 Player${playerName}Victory!`);
+                    this.highlightWinningCells();
+                    return;
+                }
+                
+                const emptyCells = this.getEmptyCells();
+                if (emptyCells.length === 0) {
+                    this.gameOver = true;
+                    this.updateStatus('🤝 เสมอ!');
+                    return;
+                }
+
+                this.currentPlayer = this.currentPlayer === 1 ? 2 : 1;
+                
+                if (this.gameMode === 'ai' && this.currentPlayer === 2 && !this.gameOver) {
+                    setTimeout(() => this.makeAIMove(), 500);
+                } else {
+                    const playerName = this.currentPlayer === 1 ? 'Black' : 'White';
+                    this.updateStatus(`${this.currentPlayer === 1 ? '⚫' : '⚪'} Turn${playerName}`);
+                }
+            }
+
+            // Override newGame สำหรับโหมดออนไลน์
+            newGame() {
+                this.gameOver = false;
+                this.currentPlayer = 1;
+                this.winningCells = [];
+                this.updateStatus('⚫ Black Start');
+                this.initializeBoard();
+                
+                if (this.isOnline && this.roomKey) {
+                    // รีเซ็ตเกมในระบบออนไลน์
+                    const roomData = JSON.parse(localStorage.getItem(this.roomKey) || '{}');
+                    roomData.board = Array(this.boardSize).fill().map(() => Array(this.boardSize).fill(0));
+                    roomData.currentPlayer = 1;
+                    roomData.gameOver = false;
+                    roomData.winner = null;
+                    roomData.winningCells = [];
+                    localStorage.setItem(this.roomKey, JSON.stringify(roomData));
+                }
+            }
+
+            // ทำลายการเชื่อมต่อเมื่อปิดหน้าเว็บ
+            destroy() {
+                if (this.pollingInterval) {
+                    clearInterval(this.pollingInterval);
+                }
+                
+                if (this.isOnline && this.roomKey) {
+                    // ลบผู้เล่นออกจากห้อง
+                    const roomData = JSON.parse(localStorage.getItem(this.roomKey) || '{}');
+                    if (roomData.players) {
+                        roomData.players = roomData.players.filter(p => p.id !== this.playerId);
+                        if (roomData.players.length === 0) {
+                            localStorage.removeItem(this.roomKey);
+                        } else {
+                            localStorage.setItem(this.roomKey, JSON.stringify(roomData));
+                        }
+                    }
+                }
+            }
+        }
+
+        // ปิด Modal กฎการเล่น
+        function closeRulesModal() {
+            document.getElementById('rulesModal').style.display = 'none';
+        }
+
+        // ปิด Modal เมื่อคลิกข้างนอก
+        window.onclick = function(event) {
+            const modal = document.getElementById('rulesModal');
+            if (event.target === modal) {
+                modal.style.display = 'none';
+            }
+        }
+
+        // เริ่มเกม
+        const game = new GomokuGame();
+
+        // ทำลายการเชื่อมต่อเมื่อปิดหน้าเว็บ
+        window.addEventListener('beforeunload', () => {
+            game.destroy();
+        });
+
+        // ปรับขนาดเกมเมื่อหน้าจอเปลี่ยน
+        window.addEventListener('resize', () => {
+            game.initializeBoard();
+        });
+    </script>
+</body>
+</html> 
